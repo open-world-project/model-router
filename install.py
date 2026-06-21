@@ -32,7 +32,7 @@ DEFAULT_ROUTER_CONFIG = {
         "provider": "openrouter",
         "model": "qwen/qwen3.5-flash-02-23",
         "base_url": "https://openrouter.ai/api/v1",
-        "api_key": "",
+        "api_key_env": "OPENROUTER_API_KEY",
         "timeout": 30,
         "extra_body": {"enable_caching": True},
     },
@@ -1857,8 +1857,107 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
+def _classifier_api_key_env(merged: dict, raw: dict | None) -> str:
+    classifier = merged.get("classifier") if isinstance(merged, dict) else {}
+    if not isinstance(classifier, dict):
+        classifier = {}
+    raw_classifier = (raw or {}).get("classifier", {}) if isinstance(raw, dict) else {}
+    if not isinstance(raw_classifier, dict):
+        raw_classifier = {}
+    api_key_env = str(
+        raw_classifier.get("api_key_env")
+        or raw_classifier.get("key_env")
+        or classifier.get("api_key_env")
+        or classifier.get("key_env")
+        or "OPENROUTER_API_KEY"
+    ).strip()
+    return api_key_env or "OPENROUTER_API_KEY"
+
+
+def _normalize_classifier_config(merged: dict, raw: dict | None) -> None:
+    """Normalize classifier config and remove legacy inline api_key secrets.
+
+    model_router.yaml stores only the env-var *name* in classifier.api_key_env.
+    The actual secret belongs in Hermes' environment (~/.hermes/.env or the
+    process env) and is synced to config.yaml as ${ENV_NAME} so Hermes resolves
+    it at runtime without persisting the value in YAML.
+    """
+    classifier = merged.get("classifier")
+    if not isinstance(classifier, dict):
+        classifier = {}
+        merged["classifier"] = classifier
+
+    classifier["api_key_env"] = _classifier_api_key_env(merged, raw)
+    classifier.pop("key_env", None)
+    classifier.pop("api_key", None)
+
+
+def _env_file_value(env_path: Path, key: str) -> str:
+    if not env_path.exists():
+        return ""
+    try:
+        for line in env_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            name, value = stripped.split("=", 1)
+            if name.strip() == key:
+                return value.strip().strip('"').strip("'")
+    except OSError:
+        return ""
+    return ""
+
+
+def _write_env_file_value(env_path: Path, key: str, value: str) -> None:
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    updated = False
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, _old = stripped.split("=", 1)
+        if name.strip() == key:
+            lines[idx] = f"{key}={value}"
+            updated = True
+            break
+    if not updated:
+        lines.append(f"{key}={value}")
+    env_path.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
+    try:
+        os.chmod(env_path, 0o600)
+    except OSError:
+        pass
+
+
+def migrate_classifier_api_key_to_env(home_dir: Path, raw: dict | None, normalized: dict) -> None:
+    """Move a legacy classifier.api_key value into the configured env var.
+
+    Does nothing when the legacy key is empty or the target env var is already
+    set in the process or in the profile's .env file.
+    """
+    raw_classifier = (raw or {}).get("classifier", {}) if isinstance(raw, dict) else {}
+    if not isinstance(raw_classifier, dict):
+        return
+    legacy_key = str(raw_classifier.get("api_key") or "").strip()
+    if not legacy_key:
+        return
+    api_key_env = _classifier_api_key_env(normalized, raw)
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", api_key_env):
+        fail(f"Invalid classifier.api_key_env in model_router.yaml: {api_key_env!r}")
+    env_path = home_dir / ".env"
+    if os.environ.get(api_key_env) or _env_file_value(env_path, api_key_env):
+        warn(f"{home_dir.name if home_dir.name != '.hermes' else 'default'}: removed classifier.api_key from model_router.yaml; {api_key_env} already exists in environment")
+        return
+    _write_env_file_value(env_path, api_key_env, legacy_key)
+    ok(f"{home_dir.name if home_dir.name != '.hermes' else 'default'}: moved classifier API key to {env_path.name} as {api_key_env}")
+
+
 def normalize_router_config(raw: dict | None) -> dict:
     merged = _deep_merge(DEFAULT_ROUTER_CONFIG, raw or {})
+    _normalize_classifier_config(merged, raw)
     normalized_tiers: dict[int, dict] = {}
     raw_tiers = merged.get("tiers", {})
     for tier_num in range(1, 6):
@@ -1887,6 +1986,8 @@ def render_router_config(router_config: dict) -> str:
 
 def ensure_router_config(home_dir: Path) -> dict:
     path = router_config_path(home_dir)
+    raw: dict | None = None
+    config: dict = {}
     if path.exists():
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -1896,8 +1997,10 @@ def ensure_router_config(home_dir: Path) -> dict:
         except Exception as exc:
             fail(f"{path} is invalid: {exc}")
     else:
-        config = normalize_router_config({})
+        raw = {}
+        config = normalize_router_config(raw)
 
+    migrate_classifier_api_key_to_env(home_dir, raw, config)
     rendered = render_router_config(config)
     existing = path.read_text(encoding="utf-8") if path.exists() else None
     if existing != rendered:
@@ -1955,12 +2058,13 @@ def ensure_plugin_enabled(text: str) -> tuple[str, bool]:
 
 def render_triage_specifier_block(router_config: dict) -> str:
     classifier = router_config["classifier"]
+    api_key_env = str(classifier.get("api_key_env") or "OPENROUTER_API_KEY").strip() or "OPENROUTER_API_KEY"
     lines = [
         "  triage_specifier:",
         f"    provider: {classifier['provider']}",
         f"    model: {classifier['model']}",
         f"    base_url: {classifier['base_url']}",
-        "    api_key: ''",
+        f"    api_key: ${{{api_key_env}}}",
         f"    timeout: {classifier['timeout']}",
         "    extra_body:",
     ]

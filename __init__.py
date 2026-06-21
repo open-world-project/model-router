@@ -41,7 +41,7 @@ DEFAULT_ROUTER_CONFIG = {
         "provider": "openrouter",
         "model": "qwen/qwen3.5-flash-02-23",
         "base_url": "https://openrouter.ai/api/v1",
-        "api_key": "",
+        "api_key_env": "OPENROUTER_API_KEY",
         "timeout": 30,
         "extra_body": {"enable_caching": True},
     },
@@ -143,8 +143,32 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return merged
 
 
+def _normalize_classifier_config(merged: dict[str, Any], raw: dict[str, Any] | None) -> None:
+    """Normalize classifier config and remove legacy inline api_key values."""
+    classifier = merged.get("classifier")
+    if not isinstance(classifier, dict):
+        classifier = {}
+        merged["classifier"] = classifier
+
+    raw_classifier = (raw or {}).get("classifier", {}) if isinstance(raw, dict) else {}
+    if not isinstance(raw_classifier, dict):
+        raw_classifier = {}
+
+    api_key_env = str(
+        raw_classifier.get("api_key_env")
+        or raw_classifier.get("key_env")
+        or classifier.get("api_key_env")
+        or classifier.get("key_env")
+        or "OPENROUTER_API_KEY"
+    ).strip()
+    classifier["api_key_env"] = api_key_env or "OPENROUTER_API_KEY"
+    classifier.pop("key_env", None)
+    classifier.pop("api_key", None)
+
+
 def _normalize_router_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged = _deep_merge(DEFAULT_ROUTER_CONFIG, raw or {})
+    _normalize_classifier_config(merged, raw)
     normalized_tiers: dict[int, dict[str, Any]] = {}
     raw_tiers = merged.get("tiers", {})
     for tier_num in range(1, 6):
