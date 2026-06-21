@@ -9,7 +9,8 @@ Automatic cost-aware model routing for Hermes Agent.
 - automatic per-turn routing,
 - manual pinning with `/t1` to `/t5` and `/auto`,
 - per-profile configuration via `model_router.yaml`,
-- automatic validation and repair of required Hermes core integrations,
+- automatic validation and repair of the small required Hermes CLI integrations,
+- plugin-registered slash commands on current Hermes builds,
 - synchronized routing docs in `skill_routing.md` and `SOUL.md`.
 
 ## Five-Tier Contract
@@ -58,7 +59,7 @@ bash install.sh seo coder trading
 
 Restart Hermes after installation.
 
-`install.sh` is safe to run repeatedly. It repairs and validates the required Hermes core patches, refreshes the global `hermes` launcher, ensures the plugin is enabled, normalizes `model_router.yaml`, syncs `auxiliary.triage_specifier`, and regenerates `skill_routing.md` plus the managed routing block in `SOUL.md`.
+`install.sh` is safe to run repeatedly. It repairs and validates the required Hermes integration points, refreshes the global `hermes` launcher, ensures the plugin is enabled, normalizes `model_router.yaml`, syncs `auxiliary.triage_specifier`, and regenerates `skill_routing.md` plus the managed routing block in `SOUL.md`. On current Hermes, `/t1` to `/t5` and `/auto` are registered through the plugin slash-command API; the remaining CLI patch points cover status-bar display, single-query live-agent binding, and inline `/model` handling.
 
 If a local `hermes-webui` checkout is detected, `install.sh` also patches its API and static UI so model-router prepares each WebUI turn before agent startup, owns the live agent during streaming, and exposes native tier controls without the noisy "CLI-only command" chat messages.
 
@@ -94,6 +95,8 @@ The installer syncs this config into:
 - `skill_routing.md` -> human-readable routing reference
 - `SOUL.md` -> managed routing guidance block
 
+`classifier.api_key_env` stores the **name** of the Hermes environment variable that holds the classifier API key. The actual secret belongs in `~/.hermes/.env` or the process environment, never in `model_router.yaml`. The installer migrates a legacy non-empty `classifier.api_key` into the configured env var when possible, then removes the YAML field.
+
 ## Customizing Models
 
 You can customize the five tier slots, but the router still expects all five tiers to exist.
@@ -121,7 +124,7 @@ classifier:
   provider: openrouter
   model: openai/gpt-4.1-mini
   base_url: https://openrouter.ai/api/v1
-  api_key: ''
+  api_key_env: OPENROUTER_API_KEY
   timeout: 30
   extra_body:
     enable_caching: true
@@ -193,12 +196,13 @@ integrations:
 
 ## Validation Model
 
-Validation is block-aware, not marker-based. Startup validation checks for the complete managed blocks in `commands.py` and `cli.py`. If even one internal line is missing, validation fails and repair restores the full block.
+Validation is block-aware, not marker-based. Startup validation checks for the complete managed blocks in `commands.py`, `cli.py`, and the current Hermes agent setup mixin (`hermes_cli/cli_agent_setup_mixin.py`). If even one internal line is missing, validation fails and repair restores the full block.
 
 ## Provider Support
 
 - The default config uses OpenRouter, and the plugin is documented and tested around that setup.
 - The runtime classifier uses Hermes `auxiliary.triage_specifier`, so provider settings come from `model_router.yaml`, then get synced into `config.yaml` by `install.sh`.
+- The classifier credential is referenced by env-var name via `classifier.api_key_env`; the installer syncs that into `auxiliary.triage_specifier.api_key` as `${ENV_NAME}` so Hermes resolves the secret from `~/.hermes/.env` or the process environment at runtime.
 - That means the plugin is not hardcoded to OpenRouter only, but non-OpenRouter providers depend on Hermes supporting them correctly through `triage_specifier`.
 
 ## Verify
@@ -217,7 +221,7 @@ cat ~/.hermes/SOUL.md
 ## Troubleshooting
 
 - Plugin not loading: run `bash install.sh`, then check `hermes plugins list` and whether `model-router` is present in the active `config.yaml`.
-- Everything falls back to `T2`: confirm `OPENROUTER_API_KEY` exists, `auxiliary.triage_specifier` is present, and `model_router.yaml` is valid YAML.
+- Everything falls back to `T2`: confirm the env var named by `classifier.api_key_env` exists (default `OPENROUTER_API_KEY`), `auxiliary.triage_specifier` is present, and `model_router.yaml` is valid YAML.
 - `/t1` to `/t5` use the wrong models: edit the correct `model_router.yaml`, re-run `install.sh`, and restart Hermes.
 - Hermes update changed patched core files: just launch Hermes and let startup validation repair it, or run `bash install.sh` manually if you want to refresh it before launch.
 - Re-run safety: repeated `bash install.sh` runs are supported and only rewrite managed files when they drift or are damaged.
