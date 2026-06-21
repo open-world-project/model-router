@@ -675,10 +675,16 @@ def _apply_tier(session_id: str, target_tier: int, current_model: str, source: s
         old_model   = agent.model
         agent.model = target_model
 
-        if target_reasoning:
-            agent.reasoning_config = {"effort": target_reasoning}
-        else:
-            agent.reasoning_config = None
+        reasoning_config = {"effort": target_reasoning} if target_reasoning else None
+        agent.reasoning_config = reasoning_config
+
+        if cli is not None:
+            try:
+                cli.model = target_model
+                cli.reasoning_config = reasoning_config
+                cli._active_agent_route_signature = None
+            except Exception:
+                pass
 
         _record_router_set(session_id)
 
@@ -889,6 +895,57 @@ def _apply_reasoning(effort: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Plugin slash commands
+# ---------------------------------------------------------------------------
+
+def _handle_tier_command(raw_args: str = "") -> str:
+    """Plugin command handler for /t1-/t5.
+
+    Core Hermes now supports plugin-registered slash commands, so the router
+    no longer needs to patch process_command() just to dispatch these.
+    """
+    try:
+        from hermes_cli.plugins import get_plugin_manager
+
+        mgr = get_plugin_manager()
+        cli = getattr(mgr, "_cli_ref", None)
+        session_id = getattr(cli, "session_id", "") if cli is not None else ""
+        raw = str(raw_args or "").strip().lower()
+        match = re.search(r"[1-5]", raw)
+        if not match:
+            return "Usage: /t1, /t2, /t3, /t4, or /t5"
+        tier_num = int(match.group(0))
+        current_model = ""
+        if cli is not None:
+            agent = getattr(cli, "agent", None)
+            current_model = (getattr(agent, "model", None) if agent is not None else None) or getattr(cli, "model", "") or ""
+        _apply_tier_by_num(session_id, tier_num, current_model)
+        meta = get_tier_meta(tier_num)
+        reasoning = meta.get("reasoning")
+        label = meta.get("label") or f"T{tier_num}"
+        if reasoning:
+            label += f" (reasoning={reasoning})"
+        return f"✓ Pinned to {label} ({meta.get('model', '')}). Auto-routing paused; use /auto to resume."
+    except Exception as exc:
+        return f"✗ Failed to switch tier: {exc}"
+
+
+def _handle_auto_command(raw_args: str = "") -> str:
+    """Plugin command handler for /auto."""
+    try:
+        from hermes_cli.plugins import get_plugin_manager
+
+        mgr = get_plugin_manager()
+        cli = getattr(mgr, "_cli_ref", None)
+        session_id = getattr(cli, "session_id", "") if cli is not None else ""
+        was_pinned = is_session_pinned(session_id)
+        unpin_session(session_id)
+        return "✓ Auto model routing resumed" if was_pinned else "✓ Auto routing already active"
+    except Exception as exc:
+        return f"✗ Failed to resume auto routing: {exc}"
+
+
+# ---------------------------------------------------------------------------
 # Plugin registration
 # ---------------------------------------------------------------------------
 
@@ -899,6 +956,17 @@ def register(ctx) -> None:
     ctx.register_hook("pre_llm_call",   on_pre_llm_call)
     ctx.register_hook("post_llm_call",  on_post_llm_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
+    for _tier_cmd in ("t1", "t2", "t3", "t4", "t5"):
+        ctx.register_command(
+            _tier_cmd,
+            (lambda raw_args="", tier_cmd=_tier_cmd: _handle_tier_command(tier_cmd)),
+            description=f"Pin session to configured {_tier_cmd.upper()} slot until /auto",
+        )
+    ctx.register_command(
+        "auto",
+        _handle_auto_command,
+        description="Resume model-router auto-routing for this session",
+    )
 
     # Expose public API on the PluginManager so slash commands (/t1-/t5, /auto)
     # can call us via get_plugin_manager().router_apply_tier(...).

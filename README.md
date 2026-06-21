@@ -9,7 +9,8 @@ Automatic cost-aware model routing for Hermes Agent.
 - automatic per-turn routing,
 - manual pinning with `/t1` to `/t5` and `/auto`,
 - per-profile configuration via `model_router.yaml`,
-- automatic validation and repair of required Hermes core integrations,
+- automatic validation and repair of the small required Hermes CLI integrations,
+- plugin-registered slash commands on current Hermes builds,
 - synchronized routing docs in `skill_routing.md` and `SOUL.md`.
 
 ## Five-Tier Contract
@@ -58,7 +59,7 @@ bash install.sh seo coder trading
 
 Restart Hermes after installation.
 
-`install.sh` is safe to run repeatedly. It repairs and validates the required Hermes core patches, refreshes the global `hermes` launcher, ensures the plugin is enabled, normalizes `model_router.yaml`, syncs `auxiliary.triage_specifier`, and regenerates `skill_routing.md` plus the managed routing block in `SOUL.md`.
+`install.sh` is safe to run repeatedly. It repairs and validates the required Hermes integration points, refreshes the global `hermes` launcher, ensures the plugin is enabled, normalizes `model_router.yaml`, syncs `auxiliary.triage_specifier`, and regenerates `skill_routing.md` plus the managed routing block in `SOUL.md`. On current Hermes, `/t1` to `/t5` and `/auto` are registered through the plugin slash-command API; the remaining CLI patch points cover status-bar display, single-query live-agent binding, and inline `/model` handling.
 
 If a local `hermes-webui` checkout is detected, `install.sh` also patches its API and static UI so model-router prepares each WebUI turn before agent startup, owns the live agent during streaming, and exposes native tier controls without the noisy "CLI-only command" chat messages.
 
@@ -193,7 +194,7 @@ integrations:
 
 ## Validation Model
 
-Validation is block-aware, not marker-based. Startup validation checks for the complete managed blocks in `commands.py` and `cli.py`. If even one internal line is missing, validation fails and repair restores the full block.
+Validation is block-aware, not marker-based. Startup validation checks for the complete managed blocks in `commands.py`, `cli.py`, and the current Hermes agent setup mixin (`hermes_cli/cli_agent_setup_mixin.py`). If even one internal line is missing, validation fails and repair restores the full block.
 
 ## Provider Support
 

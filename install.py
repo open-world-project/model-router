@@ -166,119 +166,16 @@ def is_model_router_enabled(home_dir: Path) -> bool:
     return bool(re.search(r"^\s*-\s*model-router\s*$", text, flags=re.MULTILINE))
 
 
-TIER_COMMANDS_BLOCK = """
-    #Model Router
-    CommandDef("t1", "Pin session to the configured T1 slot — disables auto-routing until /auto", "Configuration",
-               cli_only=True),
-    CommandDef("t2", "Pin session to the configured T2 slot — disables auto-routing until /auto", "Configuration",
-               cli_only=True),
-    CommandDef("t3", "Pin session to the configured T3 slot — disables auto-routing until /auto", "Configuration",
-               cli_only=True),
-    CommandDef("t4", "Pin session to the configured T4 slot — disables auto-routing until /auto", "Configuration",
-               cli_only=True),
-    CommandDef("t5", "Pin session to the configured T5 slot — disables auto-routing until /auto", "Configuration",
-               cli_only=True),
-    CommandDef("auto", "Resume auto model routing (undo /model or /t1-/t5 pin for this session)", "Configuration",
-               cli_only=True),
-"""
+CLI_SETUP_MIXIN_REF_BLOCK = """            # Ensure plugin manager has a CLI reference in every agent-start path.
+            # Interactive run() already sets this, but single-query / -q and quiet
+            # mode initialize agents through _init_agent() without entering run().
+            # model-router uses this reference to steer the live CLI agent.
+            try:
+                from hermes_cli.plugins import get_plugin_manager
+                get_plugin_manager()._cli_ref = self
+            except Exception:
+                pass
 
-CLI_REF_BLOCK = """        # Ensure plugin manager has a CLI reference even in non-interactive
-        # (single-query / -q) mode where run() is never called.
-        # This is required for model-router and other plugins that access
-        # the agent via ctx._manager._cli_ref.
-        try:
-            from hermes_cli.plugins import get_plugin_manager
-            _pm = get_plugin_manager()
-            if _pm._cli_ref is None:
-                _pm._cli_ref = self
-        except Exception:
-            pass
-
-"""
-
-CLI_TIER_HANDLERS_BLOCK = '''    def _handle_tier_pin(self, tier_cmd: str) -> None:
-        """/t1 /t2 /t3 /t4 /t5 — pin session to a specific model tier.
-
-        Immediately switches the model and pins auto-routing off for the
-        entire session. Use /auto to re-enable auto-routing.
-        """
-        tier_map = {"t1": 1, "t2": 2, "t3": 3, "t4": 4, "t5": 5}
-        tier_num = tier_map.get(tier_cmd.lstrip("/").lower())
-        if tier_num is None:
-            _cprint(f"  ✗ Unknown tier command: /{tier_cmd}")
-            return
-
-        try:
-            from hermes_cli.plugins import get_plugin_manager
-            _mgr = get_plugin_manager()
-            _apply_fn = getattr(_mgr, "router_apply_tier", None)
-            _meta_fn = getattr(_mgr, "router_get_tier_meta", None)
-            if _apply_fn is None:
-                _cprint("  ✗ model-router plugin not active — /t1-/t5 unavailable")
-                _cprint("    Enable it: add 'model-router' to plugins.enabled in config.yaml")
-                return
-
-            current_model = (
-                getattr(self.agent, "model", None) if self.agent else None
-            ) or self.model or ""
-            session_id = self.session_id or ""
-
-            _apply_fn(session_id, tier_num, current_model)
-
-            # Reflect the tier chosen by the plugin using the active router config
-            # instead of baked-in model slugs.
-            meta = _meta_fn(tier_num) if _meta_fn else {}
-            new_model = meta.get("model")
-            if not new_model:
-                _cprint(f"  ✗ Tier T{tier_num} is not configured correctly in model_router.yaml")
-                _cprint("    Fix the active profile router config or re-run install.sh, then try again.")
-                return
-            reasoning = meta.get("reasoning")
-            tier_label = meta.get("label") or f"T{tier_num}"
-            if reasoning:
-                tier_label += f" (reasoning={reasoning})"
-            if self.agent:
-                self.agent.model = new_model
-            self.model = new_model
-
-            _cprint(f"  ✓ Pinned to {tier_label} ({new_model})")
-            _cprint("    Auto-routing paused for this session. Use /auto to resume.")
-
-        except Exception as exc:
-            _cprint(f"  ✗ Failed to switch tier: {exc}")
-
-    def _handle_auto_routing(self) -> None:
-        """/auto — resume auto model routing after a /model or /t1-/t5 pin."""
-        try:
-            from hermes_cli.plugins import get_plugin_manager
-            _mgr = get_plugin_manager()
-            _unpin_fn = getattr(_mgr, "router_unpin_session", None)
-            _is_pinned_fn = getattr(_mgr, "router_is_pinned", None)
-
-            if _unpin_fn is None:
-                _cprint("  ✗ model-router plugin not active — /auto unavailable")
-                _cprint("    Enable it: add 'model-router' to plugins.enabled in config.yaml")
-                return
-
-            session_id = self.session_id or ""
-            was_pinned = _is_pinned_fn(session_id) if _is_pinned_fn else False
-            _unpin_fn(session_id)
-
-            if was_pinned:
-                _cprint("  ✓ Auto model routing resumed")
-                _cprint("    Next turn will be classified by Flash and routed automatically.")
-            else:
-                _cprint("  ✓ Auto routing already active (no pin was set)")
-
-        except Exception as exc:
-            _cprint(f"  ✗ Failed to resume auto routing: {exc}")
-
-'''
-
-CLI_PROCESS_COMMAND_BLOCK = """        elif canonical in ("t1", "t2", "t3", "t4", "t5"):
-            self._handle_tier_pin(canonical)
-        elif canonical == "auto":
-            self._handle_auto_routing()
 """
 
 CLI_INLINE_ROUTING_BLOCK = """                # Handle /model directly on the UI thread so interactive pickers
@@ -289,6 +186,13 @@ CLI_INLINE_ROUTING_BLOCK = """                # Handle /model directly on the UI
                         if event.app.is_running:
                             event.app.exit()
                     event.app.current_buffer.reset(append_to_history=True)
+                    # Force a repaint: process_command() prints through
+                    # patch_stdout (scrolls output above the prompt) and never
+                    # invalidates the app, so the just-cleared input area can
+                    # keep showing the submitted text until some unrelated
+                    # redraw fires. Every other early-return branch in this
+                    # handler invalidates after reset — match them.
+                    event.app.invalidate()
                     return
 
 """
@@ -1343,6 +1247,13 @@ def _replace_or_insert_block(
 
 
 def repair_commands_py(commands_path: Path) -> bool:
+    """Remove legacy model-router CommandDef injections from commands.py.
+
+    Current Hermes exposes plugin slash commands through
+    PluginContext.register_command(), including CLI autocomplete and gateway
+    command surfacing. Keeping /t1-/t5 and /auto as injected built-ins makes
+    the plugin command registration conflict and blocks the modern path.
+    """
     if not commands_path.exists():
         return False
     text = commands_path.read_text(encoding="utf-8")
@@ -1358,15 +1269,38 @@ def repair_commands_py(commands_path: Path) -> bool:
         cleaned,
         flags=re.MULTILINE | re.DOTALL,
     )
-    cleaned = _replace_or_insert_block(
-        text=cleaned,
-        expected_block=TIER_COMMANDS_BLOCK,
-        existing_pattern="",
-        insert_anchor_pattern=r"^\]$",
-        insert_after_match=False,
-        missing_error="Could not locate command registry closing bracket in commands.py for model-router patching",
-    )
     return _write_with_backup_if_changed(commands_path, cleaned)
+
+
+def repair_cli_setup_mixin_py(mixin_path: Path) -> bool:
+    """Patch the current Hermes agent-construction mixin with a CLI reference.
+
+    Hermes moved _init_agent() out of cli.py into
+    hermes_cli/cli_agent_setup_mixin.py.  The old installer looked for the
+    runtime credential guard in cli.py, which no longer exists.  Patch the
+    live agent creation path instead so interactive, single-query, and quiet
+    mode all expose get_plugin_manager()._cli_ref for model-router.
+    """
+    if not mixin_path.exists():
+        return False
+
+    text = mixin_path.read_text(encoding="utf-8")
+    original = text
+    text = _replace_or_insert_block(
+        text=text,
+        expected_block=CLI_SETUP_MIXIN_REF_BLOCK,
+        existing_pattern=(
+            r'^\s*# Ensure plugin manager has a CLI reference (?:in every agent-start path|even in non-interactive).*?'
+            r'^\s*pass\n+'
+        ),
+        insert_anchor_pattern=r'^\s*self\.agent\._print_fn = _cprint\n',
+        insert_after_match=True,
+        missing_error="Could not locate agent print-hook anchor in hermes_cli/cli_agent_setup_mixin.py for model-router patching",
+    )
+
+    if text == original:
+        return False
+    return _write_with_backup_if_changed(mixin_path, text)
 
 
 def repair_cli_py(cli_path: Path) -> bool:
@@ -1376,31 +1310,22 @@ def repair_cli_py(cli_path: Path) -> bool:
     text = cli_path.read_text(encoding="utf-8")
     original = text
 
-    text = _replace_or_insert_block(
-        text=text,
-        expected_block=CLI_REF_BLOCK,
-        existing_pattern=r'^\s*# Ensure plugin manager has a CLI reference even in non-interactive.*?^\s*pass\n+',
-        insert_anchor_pattern=r"^\s*if not self\._ensure_runtime_credentials\(\):\n\s*return False\n",
-        insert_after_match=True,
-        missing_error="Could not locate runtime credential guard in cli.py for model-router patching",
+    # Current Hermes supports plugin-registered slash commands. Remove the
+    # older model-router CLI method/dispatch injection if a previous installer
+    # added it, so /t1-/t5 and /auto dispatch through the plugin registry.
+    text = re.sub(
+        r'^\s*def _handle_tier_pin\(self, tier_cmd: str\) -> None:.*?(?=^\s*def _should_handle_model_command_inline\()',
+        "",
+        text,
+        count=1,
+        flags=re.MULTILINE | re.DOTALL,
     )
-
-    text = _replace_or_insert_block(
-        text=text,
-        expected_block=CLI_TIER_HANDLERS_BLOCK,
-        existing_pattern=r'^\s*def _handle_tier_pin\(self, tier_cmd: str\) -> None:.*?(?=^\s*def _should_handle_model_command_inline\()',
-        insert_anchor_pattern=r'^\s*def _should_handle_model_command_inline\(',
-        insert_after_match=False,
-        missing_error="Could not locate _should_handle_model_command_inline anchor in cli.py for model-router patching",
-    )
-
-    text = _replace_or_insert_block(
-        text=text,
-        expected_block=CLI_PROCESS_COMMAND_BLOCK,
-        existing_pattern=r'^\s*elif canonical in \("t1", "t2", "t3", "t4", "t5"\):\n\s*self\._handle_tier_pin\(canonical\)\n\s*elif canonical == "auto":\n\s*self\._handle_auto_routing\(\)\n',
-        insert_anchor_pattern=r'^\s*elif canonical == "model":\n\s*self\._handle_model_switch\(cmd_original\)\n',
-        insert_after_match=True,
-        missing_error="Could not locate /model branch in cli.py for model-router patching",
+    text = re.sub(
+        r'^\s*elif canonical in \("t1", "t2", "t3", "t4", "t5"\):\n\s*self\._handle_tier_pin\(canonical\)\n\s*elif canonical == "auto":\n\s*self\._handle_auto_routing\(\)\n',
+        "",
+        text,
+        count=1,
+        flags=re.MULTILINE,
     )
 
     text = _replace_or_insert_block(
@@ -1767,12 +1692,14 @@ def repair_hermes_core(home_root: Path) -> None:
     repo = home_root / "hermes-agent"
     cli_path = repo / "cli.py"
     commands_path = repo / "hermes_cli" / "commands.py"
-    if not cli_path.exists() or not commands_path.exists():
+    setup_mixin_path = repo / "hermes_cli" / "cli_agent_setup_mixin.py"
+    if not cli_path.exists() or not commands_path.exists() or not setup_mixin_path.exists():
         warn("Hermes source checkout not found; skipping core repair")
         return
 
     changed = False
     changed = repair_commands_py(commands_path) or changed
+    changed = repair_cli_setup_mixin_py(setup_mixin_path) or changed
     changed = repair_cli_py(cli_path) or changed
     if not changed:
         ok("Hermes core integrations already patched")
@@ -1782,21 +1709,21 @@ def collect_missing_core_integrations(home_root: Path) -> list[str]:
     repo = home_root / "hermes-agent"
     cli_path = repo / "cli.py"
     commands_path = repo / "hermes_cli" / "commands.py"
-    if not cli_path.exists() or not commands_path.exists():
+    setup_mixin_path = repo / "hermes_cli" / "cli_agent_setup_mixin.py"
+    if not cli_path.exists() or not commands_path.exists() or not setup_mixin_path.exists():
         return []
 
     cli_text = cli_path.read_text(encoding="utf-8")
     commands_text = commands_path.read_text(encoding="utf-8")
+    setup_mixin_text = setup_mixin_path.read_text(encoding="utf-8")
 
     missing: list[str] = []
-    if f"{TIER_COMMANDS_BLOCK}]" not in commands_text:
-        missing.append("complete slash command block for /t1-/t5 and /auto in the command registry")
-    if CLI_REF_BLOCK not in cli_text:
-        missing.append("complete cli.py _cli_ref block for non-interactive mode")
-    if CLI_TIER_HANDLERS_BLOCK not in cli_text:
-        missing.append("complete CLI tier handler block for /t1-/t5 and /auto")
-    if CLI_PROCESS_COMMAND_BLOCK not in cli_text:
-        missing.append("complete process_command dispatch block for /t1-/t5 and /auto")
+    if "CommandDef(\"t1\"" in commands_text or "#Model Router" in commands_text:
+        missing.append("legacy model-router slash command block still present in the command registry")
+    if CLI_SETUP_MIXIN_REF_BLOCK not in setup_mixin_text:
+        missing.append("complete cli_agent_setup_mixin.py _cli_ref block for all agent-start paths")
+    if "def _handle_tier_pin" in cli_text or 'canonical in ("t1", "t2", "t3", "t4", "t5")' in cli_text:
+        missing.append("legacy model-router /t1-/t5 cli.py dispatch block still present")
     if CLI_INLINE_ROUTING_BLOCK not in cli_text:
         missing.append("complete inline UI-thread routing block for /model and /t1-/t5")
     return missing
@@ -1806,7 +1733,8 @@ def compat_check(home_root: Path) -> None:
     repo = home_root / "hermes-agent"
     cli_path = repo / "cli.py"
     commands_path = repo / "hermes_cli" / "commands.py"
-    if not cli_path.exists() or not commands_path.exists():
+    setup_mixin_path = repo / "hermes_cli" / "cli_agent_setup_mixin.py"
+    if not cli_path.exists() or not commands_path.exists() or not setup_mixin_path.exists():
         warn("Hermes source checkout not found; skipping compatibility checks")
         return
 
